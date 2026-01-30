@@ -5,13 +5,10 @@ def main():
     sb = get_supabase_client()
     now = datetime.now(timezone.utc).isoformat()
 
-    sources = sb.table("sources").select("id,name").eq("enabled", True).execute().data
-    if not sources:
-        print("No enabled sources.")
-        return
+    sources = sb.table("sources").select("id,name").eq("active", True).execute().data
 
     for src in sources:
-        snapshots = (
+        snaps = (
             sb.table("snapshots")
             .select("id,content_hash,fetched_at")
             .eq("source_id", src["id"])
@@ -21,22 +18,23 @@ def main():
             .data
         )
 
-        if len(snapshots) < 2:
-            print(f"Skipping {src['name']} (not enough snapshots)")
+        if len(snaps) < 2:
             continue
 
-        latest, previous = snapshots[0], snapshots[1]
+        latest, previous = snaps
 
         if latest["content_hash"] == previous["content_hash"]:
-            print(f"No change detected for {src['name']}")
             continue
 
         payload = {
             "source_id": src["id"],
             "prev_snapshot_id": previous["id"],
             "new_snapshot_id": latest["id"],
-            "detected_at": now,
-            "status": "new",
+            "diff_json": {
+                "prev_hash": previous["content_hash"],
+                "new_hash": latest["content_hash"],
+            },
+            "created_at": now,
         }
 
         sb.table("changes").insert(payload).execute()

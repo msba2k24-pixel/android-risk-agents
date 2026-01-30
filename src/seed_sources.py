@@ -15,14 +15,12 @@ def main():
     now = datetime.now(timezone.utc).isoformat()
 
     for s in SOURCES:
-        existing = (
-            sb.table("sources")
-            .select("id")
-            .eq("url", s["url"])
-            .limit(1)
-            .execute()
-            .data
-        )
+        # Try find existing row by URL first
+        existing = sb.table("sources").select("id").eq("url", s["url"]).limit(1).execute().data
+
+        # If not found, try by name (to update old/bad URL rows)
+        if not existing:
+            existing = sb.table("sources").select("id").eq("name", s["name"]).limit(1).execute().data
 
         payload = {
             "agent_name": AGENT_NAME,
@@ -34,13 +32,11 @@ def main():
         }
 
         if existing:
-            # update existing row
             sb.table("sources").update(payload).eq("id", existing[0]["id"]).execute()
         else:
-            # insert new row
             sb.table("sources").insert(payload).execute()
 
-    print("✅ Sources seeded (no upsert, schema-safe).")
+    print("✅ Sources seeded/updated (URL fixes applied).")
 
 if __name__ == "__main__":
     main()

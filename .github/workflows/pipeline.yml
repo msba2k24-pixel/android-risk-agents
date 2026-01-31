@@ -59,11 +59,12 @@ jobs:
         run: |
           python -m src.detect_changes
 
-      - name: Generate insights (Hugging Face)
+      - name: Generate insights (Groq)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_MODEL: "mistralai/Mistral-7B-Instruct-v0.2"
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: "llama-3.1-8b-instant"
+          AGENT_NAME: "groq-demo"
         run: |
-          python -m src.generate_insights_hf
+          python -m src.generate_insights_groq

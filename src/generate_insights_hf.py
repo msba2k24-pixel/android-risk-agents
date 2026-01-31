@@ -19,7 +19,7 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 if not HF_TOKEN:
     raise RuntimeError("HF_TOKEN is missing. Add it as a GitHub Actions secret and pass env HF_TOKEN.")
 
-MODEL = os.getenv("HF_MODEL", "HuggingFaceH4/zephyr-7b-beta")
+MODEL = os.getenv("HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.2")
 AGENT_NAME = os.getenv("AGENT_NAME", "hf-demo")
 
 SYSTEM = (

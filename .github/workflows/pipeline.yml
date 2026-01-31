@@ -64,6 +64,6 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_MODEL: "HuggingFaceH4/zephyr-7b-beta"
+          HF_MODEL: "mistralai/Mistral-7B-Instruct-v0.2"
         run: |
           python -m src.generate_insights_hf

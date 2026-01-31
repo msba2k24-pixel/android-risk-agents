@@ -126,9 +126,10 @@ def get_uninsighted_changes(limit: int = 25) -> List[ChangeRow]:
 def create_baseline_changes(limit: int = 10) -> int:
     """
     First-run demo helper:
-    If 'changes' is empty, create baseline change rows pointing to each source's latest snapshot.
-    Inserts into:
-      changes(source_id, prev_snapshot_id=NULL, new_snapshot_id, diff_json, created_at)
+    Your DB requires changes.prev_snapshot_id NOT NULL.
+    So baseline rows set:
+      prev_snapshot_id = new_snapshot_id = latest snapshot id
+    This creates a "baseline change" so insights can run on first day.
     """
     sb = get_supabase_client()
 
@@ -173,11 +174,14 @@ def create_baseline_changes(limit: int = 10) -> int:
         if sid in existing_sources:
             continue
 
+        snap_id = int(snap["id"])
+
         to_insert.append(
             {
                 "source_id": sid,
-                "prev_snapshot_id": None,
-                "new_snapshot_id": int(snap["id"]),
+                # NOT NULL constraint: set prev = new snapshot id
+                "prev_snapshot_id": snap_id,
+                "new_snapshot_id": snap_id,
                 "diff_json": {"type": "baseline", "note": "Initial baseline change for demo"},
                 "created_at": now,
             }
@@ -191,27 +195,3 @@ def create_baseline_changes(limit: int = 10) -> int:
 
     sb.table("changes").insert(to_insert).execute()
     return len(to_insert)
-
-
-def insert_insight(
-    change_id: int,
-    agent_name: str,
-    title: str,
-    summary: str,
-    confidence: float,
-) -> None:
-    """
-    Option A (demo): write only minimal fields to insights table.
-    """
-    sb = get_supabase_client()
-
-    payload = {
-        "change_id": int(change_id),
-        "agent_name": agent_name,
-        "title": title,
-        "summary": summary,
-        "confidence": float(confidence),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    sb.table("insights").insert(payload).execute()

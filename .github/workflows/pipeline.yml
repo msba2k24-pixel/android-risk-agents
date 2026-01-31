@@ -5,9 +5,15 @@ on:
   schedule:
     - cron: "0 14 * * *"  # daily at 14:00 UTC
 
+concurrency:
+  group: android-risk-agents-pipeline
+  cancel-in-progress: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,7 +43,7 @@ jobs:
           USER_AGENT: "android-risk-agents-bot/0.1 (github-actions)"
         run: |
           python -m src.discover_bulletins
-          
+
       - name: Scrape sources
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -52,3 +58,12 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           python -m src.detect_changes
+
+      - name: Generate insights (Hugging Face)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_MODEL: "HuggingFaceH4/zephyr-7b-beta"
+        run: |
+          python -m src.generate_insights_hf

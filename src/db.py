@@ -63,7 +63,7 @@ def _get_source_url(source_id: int) -> str:
 def get_uninsighted_changes(limit: int = 25) -> List[ChangeRow]:
     """
     Returns latest changes that do not yet have an insights row.
-    Your schema:
+    Schema:
       changes: id, source_id, prev_snapshot_id, new_snapshot_id, created_at
       insights: change_id
     """
@@ -158,7 +158,6 @@ def create_baseline_changes(limit: int = 10) -> int:
     if not source_ids:
         return 0
 
-    # Find sources that already have at least one change row
     ch_resp = (
         sb.table("changes")
         .select("source_id")
@@ -202,18 +201,31 @@ def insert_insight(
     title: str,
     summary: str,
     confidence: float,
+    category: str = "general",
+    affected_signals: Optional[List[str]] = None,
+    recommended_actions: Optional[List[str]] = None,
+    risk_score: int = 1,
 ) -> None:
     """
-    Option A demo: insert minimal fields into insights table.
+    Insert an insight row that satisfies NOT NULL constraints in your insights table.
     """
     sb = get_supabase_client()
+
+    if affected_signals is None:
+        affected_signals = []
+    if recommended_actions is None:
+        recommended_actions = []
 
     payload = {
         "change_id": int(change_id),
         "agent_name": agent_name,
         "title": title,
         "summary": summary,
+        "category": category,  # NOT NULL
+        "affected_signals": affected_signals,  # jsonb
+        "recommended_actions": recommended_actions,  # jsonb
         "confidence": float(confidence),
+        "risk_score": int(risk_score),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 

@@ -2,8 +2,7 @@
 import os
 import json
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from openai import OpenAI
 
@@ -45,12 +44,12 @@ def extract_json_only(s: str) -> Dict[str, Any]:
 
 def build_prompt(old_text: str, new_text: str, url: str) -> str:
     schema_hint = {
-        "title": "string, short headline",
-        "summary": "string, 1-3 sentences",
-        "category": "one of: bulletin_update, cve_update, policy_update, tooling_update, general",
-        "affected_signals": ["string, up to 5 items"],
-        "recommended_actions": ["string, up to 5 items"],
-        "risk_score": "integer 1..5",
+        "title": "string",
+        "summary": "string (1-3 sentences)",
+        "category": "string (optional)",
+        "affected_signals": ["string (optional, up to 5)"],
+        "recommended_actions": ["string (optional, up to 5)"],
+        "risk_score": "integer 1..5 (optional)",
         "confidence": "number 0..1",
     }
 
@@ -67,32 +66,37 @@ def safe_output(obj: Dict[str, Any]) -> Dict[str, Any]:
     title = str(obj.get("title", "")).strip() or "Update detected"
     summary = str(obj.get("summary", "")).strip() or "Update detected. Details unknown."
 
-    category = str(obj.get("category", "general")).strip()
-    allowed = {"bulletin_update", "cve_update", "policy_update", "tooling_update", "general"}
-    if category not in allowed:
-        category = "general"
+    category = obj.get("category")
+    if category is not None:
+        category = str(category).strip()[:80]
+        if category == "":
+            category = None
 
-    affected_signals = obj.get("affected_signals", [])
-    if not isinstance(affected_signals, list):
-        affected_signals = []
-    affected_signals = [str(x)[:120] for x in affected_signals][:5]
+    affected_signals = obj.get("affected_signals", None)
+    if affected_signals is not None and not isinstance(affected_signals, list):
+        affected_signals = None
+    if isinstance(affected_signals, list):
+        affected_signals = [str(x)[:120] for x in affected_signals][:5]
 
-    recommended_actions = obj.get("recommended_actions", [])
-    if not isinstance(recommended_actions, list):
-        recommended_actions = []
-    recommended_actions = [str(x)[:140] for x in recommended_actions][:5]
-
-    try:
-        risk_score = int(obj.get("risk_score", 1))
-    except Exception:
-        risk_score = 1
-    risk_score = max(1, min(5, risk_score))
+    recommended_actions = obj.get("recommended_actions", None)
+    if recommended_actions is not None and not isinstance(recommended_actions, list):
+        recommended_actions = None
+    if isinstance(recommended_actions, list):
+        recommended_actions = [str(x)[:140] for x in recommended_actions][:5]
 
     try:
         confidence = float(obj.get("confidence", 0.6))
     except Exception:
         confidence = 0.6
     confidence = max(0.0, min(1.0, confidence))
+
+    risk_score = obj.get("risk_score", None)
+    if risk_score is not None:
+        try:
+            risk_score = int(risk_score)
+            risk_score = max(1, min(5, risk_score))
+        except Exception:
+            risk_score = None
 
     return {
         "title": title[:120],
@@ -110,6 +114,7 @@ def run() -> int:
 
     changes = get_uninsighted_changes(limit=25)
 
+    # First-run helper: if no changes exist yet, create baselines
     if not changes:
         created = create_baseline_changes(limit=10)
         print(f"No changes pending insights. Created baseline changes: {created}")
@@ -144,27 +149,28 @@ def run() -> int:
             raw = extract_json_only(content)
             out = safe_output(raw)
 
+            # ✅ upsert happens in db.insert_insight because of UNIQUE(change_id)
             insert_insight(
                 change_id=ch.id,
                 agent_name=AGENT_NAME,
                 title=out["title"],
                 summary=out["summary"],
                 confidence=out["confidence"],
-                category=out["category"],
-                affected_signals=out["affected_signals"],
-                recommended_actions=out["recommended_actions"],
-                risk_score=out["risk_score"],
+                category=out["category"],  # can be None
+                affected_signals=out["affected_signals"],  # can be None to use DB default
+                recommended_actions=out["recommended_actions"],  # can be None
+                risk_score=out["risk_score"],  # can be None
             )
 
             created_insights += 1
-            print(f"Insight created for change_id={ch.id}")
+            print(f"Insight upserted for change_id={ch.id}")
             time.sleep(0.25)
 
         except Exception as e:
             print(f"Insight failed for change_id={getattr(ch, 'id', 'unknown')}: {e}")
             continue
 
-    print(f"Done. Created {created_insights}/{len(changes)} insights.")
+    print(f"Done. Upserted {created_insights}/{len(changes)} insights.")
     return 0
 
 

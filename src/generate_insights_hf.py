@@ -3,7 +3,7 @@ import os
 import json
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from huggingface_hub import InferenceClient
 
@@ -15,25 +15,19 @@ if not HF_TOKEN:
     raise RuntimeError("HF_TOKEN is missing. Add it as a GitHub Actions secret and pass env HF_TOKEN.")
 
 MODEL = os.getenv("HF_MODEL", "HuggingFaceH4/zephyr-7b-beta")
+AGENT_NAME = os.getenv("AGENT_NAME", "hf-demo")
 
 SYSTEM = (
     "You are a security research assistant. "
     "Given old and new text from a monitored Android security source, "
-    "produce structured, concise insights about what changed. "
-    "Do not invent facts. If unknown, say unknown. "
+    "summarize what changed for a demo. "
+    "Do not invent facts. If uncertain, say unknown. "
     "Return only valid JSON."
 )
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def clamp_list(xs: List[str], max_items: int, max_len: int) -> List[str]:
-    out: List[str] = []
-    for x in xs[:max_items]:
-        out.append(str(x)[:max_len])
-    return out
 
 
 def extract_json_only(s: str) -> Dict[str, Any]:
@@ -50,10 +44,7 @@ def extract_json_only(s: str) -> Dict[str, Any]:
 
 def build_prompt(old_text: str, new_text: str, url: str) -> str:
     schema_hint = {
-        "summary": "string, 1-3 sentences",
-        "key_points": ["string, up to 6 bullets"],
-        "cves": ["string, items like CVE-2025-12345"],
-        "severity": "low|medium|high|critical|unknown",
+        "summary": "string, 1 to 3 sentences",
         "confidence": "number 0..1"
     }
 
@@ -66,41 +57,19 @@ def build_prompt(old_text: str, new_text: str, url: str) -> str:
     )
 
 
-def safe_insight(insight: Dict[str, Any]) -> Dict[str, Any]:
-    summary = str(insight.get("summary", ""))[:1200]
-
-    key_points = insight.get("key_points", [])
-    if not isinstance(key_points, list):
-        key_points = []
-    key_points = clamp_list([str(x) for x in key_points], max_items=6, max_len=220)
-
-    cves = insight.get("cves", [])
-    if not isinstance(cves, list):
-        cves = []
-    cves_clean: List[str] = []
-    for x in cves:
-        sx = str(x).strip().upper()
-        if "CVE-" in sx:
-            cves_clean.append(sx[:30])
-    cves_clean = cves_clean[:20]
-
-    severity = str(insight.get("severity", "unknown")).lower()
-    if severity not in {"low", "medium", "high", "critical", "unknown"}:
-        severity = "unknown"
+def safe_output(obj: Dict[str, Any]) -> Dict[str, Any]:
+    summary = str(obj.get("summary", "")).strip()
+    if not summary:
+        summary = "Update detected. Details unknown."
 
     try:
-        confidence = float(insight.get("confidence", 0.5))
+        confidence = float(obj.get("confidence", 0.5))
     except Exception:
         confidence = 0.5
+
     confidence = max(0.0, min(1.0, confidence))
 
-    return {
-        "summary": summary,
-        "key_points": key_points,
-        "cves": cves_clean,
-        "severity": severity,
-        "confidence": confidence,
-    }
+    return {"summary": summary[:1200], "confidence": confidence}
 
 
 def run() -> int:
@@ -114,9 +83,8 @@ def run() -> int:
     created = 0
     for ch in changes:
         try:
-            # old_snapshot_id can be None for first snapshot - handle safely
             old_text = ""
-            if getattr(ch, "old_snapshot_id", None):
+            if ch.old_snapshot_id is not None:
                 old_text = get_snapshot_text_by_id(ch.old_snapshot_id) or ""
 
             new_text = get_snapshot_text_by_id(ch.new_snapshot_id) or ""
@@ -127,28 +95,26 @@ def run() -> int:
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=450,
+                max_tokens=250,
                 temperature=0.2,
             )
 
             content = resp.choices[0].message["content"]
             raw = extract_json_only(content)
-            insight = safe_insight(raw)
+            out = safe_output(raw)
 
             insert_insight(
-                source_id=ch.source_id,
                 change_id=ch.id,
-                snapshot_id=ch.new_snapshot_id,
-                insight_json=insight,
-                generated_at_utc=utc_now(),
-                model=f"hf:{MODEL}",
+                agent_name=AGENT_NAME,
+                title="Update detected",
+                summary=out["summary"],
+                confidence=out["confidence"],
             )
 
             created += 1
             print(f"Insight created for change_id={ch.id}")
 
-            # Light throttling to reduce rate-limit risk
-            time.sleep(0.5)
+            time.sleep(0.4)
 
         except Exception as e:
             print(f"Insight failed for change_id={getattr(ch, 'id', 'unknown')}: {e}")

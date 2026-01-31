@@ -1,18 +1,14 @@
+# src/generate_insights_hf.py
 import os
 import json
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, List
-from .db import get_uninsighted_changes, get_snapshot_text_by_id, insert_insight
+from typing import Any, Dict, List
+
 from huggingface_hub import InferenceClient
 
-# You already have these in your project. If names differ, tell me your exact names and I will align.
-from db import (
-    get_uninsighted_changes,   # returns list of changes without insights yet
-    get_snapshot_text_by_id,   # returns clean_text string for snapshot_id
-    insert_insight,            # inserts a row into insights table
-)
+from .db import get_uninsighted_changes, get_snapshot_text_by_id, insert_insight
+
 
 HF_TOKEN = os.getenv("HF_TOKEN")
 if not HF_TOKEN:
@@ -28,14 +24,17 @@ SYSTEM = (
     "Return only valid JSON."
 )
 
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 def clamp_list(xs: List[str], max_items: int, max_len: int) -> List[str]:
-    out = []
+    out: List[str] = []
     for x in xs[:max_items]:
         out.append(str(x)[:max_len])
     return out
+
 
 def extract_json_only(s: str) -> Dict[str, Any]:
     s = s.strip()
@@ -47,6 +46,7 @@ def extract_json_only(s: str) -> Dict[str, Any]:
         if start == -1 or end == -1:
             raise
         return json.loads(s[start : end + 1])
+
 
 def build_prompt(old_text: str, new_text: str, url: str) -> str:
     schema_hint = {
@@ -65,6 +65,7 @@ def build_prompt(old_text: str, new_text: str, url: str) -> str:
         f"Schema:\n{json.dumps(schema_hint)}"
     )
 
+
 def safe_insight(insight: Dict[str, Any]) -> Dict[str, Any]:
     summary = str(insight.get("summary", ""))[:1200]
 
@@ -76,7 +77,7 @@ def safe_insight(insight: Dict[str, Any]) -> Dict[str, Any]:
     cves = insight.get("cves", [])
     if not isinstance(cves, list):
         cves = []
-    cves_clean = []
+    cves_clean: List[str] = []
     for x in cves:
         sx = str(x).strip().upper()
         if "CVE-" in sx:
@@ -101,6 +102,7 @@ def safe_insight(insight: Dict[str, Any]) -> Dict[str, Any]:
         "confidence": confidence,
     }
 
+
 def run() -> int:
     client = InferenceClient(model=MODEL, token=HF_TOKEN)
 
@@ -112,9 +114,12 @@ def run() -> int:
     created = 0
     for ch in changes:
         try:
-            old_text = get_snapshot_text_by_id(ch.old_snapshot_id) or ""
-            new_text = get_snapshot_text_by_id(ch.new_snapshot_id) or ""
+            # old_snapshot_id can be None for first snapshot - handle safely
+            old_text = ""
+            if getattr(ch, "old_snapshot_id", None):
+                old_text = get_snapshot_text_by_id(ch.old_snapshot_id) or ""
 
+            new_text = get_snapshot_text_by_id(ch.new_snapshot_id) or ""
             prompt = build_prompt(old_text, new_text, ch.url)
 
             resp = client.chat_completion(
@@ -151,6 +156,7 @@ def run() -> int:
 
     print(f"Done. Created {created}/{len(changes)} insights.")
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(run())

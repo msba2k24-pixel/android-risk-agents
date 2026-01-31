@@ -123,6 +123,76 @@ def get_uninsighted_changes(limit: int = 25) -> List[ChangeRow]:
     return out
 
 
+def create_baseline_changes(limit: int = 10) -> int:
+    """
+    First-run demo helper:
+    If 'changes' is empty, create baseline change rows pointing to each source's latest snapshot.
+    Inserts into:
+      changes(source_id, prev_snapshot_id=NULL, new_snapshot_id, diff_json, created_at)
+    """
+    sb = get_supabase_client()
+
+    snaps_resp = (
+        sb.table("snapshots")
+        .select("id, source_id, fetched_at")
+        .order("fetched_at", desc=True)
+        .limit(300)
+        .execute()
+    )
+    snaps = snaps_resp.data or []
+    if not snaps:
+        return 0
+
+    latest_by_source: Dict[int, Dict[str, Any]] = {}
+    for s in snaps:
+        sid = s.get("source_id")
+        snap_id = s.get("id")
+        if sid is None or snap_id is None:
+            continue
+        sid_i = int(sid)
+        if sid_i not in latest_by_source:
+            latest_by_source[sid_i] = s
+
+    source_ids = list(latest_by_source.keys())
+    if not source_ids:
+        return 0
+
+    # Find sources that already have at least one change row
+    ch_resp = (
+        sb.table("changes")
+        .select("source_id")
+        .in_("source_id", source_ids)
+        .execute()
+    )
+    existing_sources = {int(r["source_id"]) for r in (ch_resp.data or []) if r.get("source_id") is not None}
+
+    to_insert: List[Dict[str, Any]] = []
+    now = datetime.now(timezone.utc).isoformat()
+
+    for sid, snap in latest_by_source.items():
+        if sid in existing_sources:
+            continue
+
+        to_insert.append(
+            {
+                "source_id": sid,
+                "prev_snapshot_id": None,
+                "new_snapshot_id": int(snap["id"]),
+                "diff_json": {"type": "baseline", "note": "Initial baseline change for demo"},
+                "created_at": now,
+            }
+        )
+
+        if len(to_insert) >= limit:
+            break
+
+    if not to_insert:
+        return 0
+
+    sb.table("changes").insert(to_insert).execute()
+    return len(to_insert)
+
+
 def insert_insight(
     change_id: int,
     agent_name: str,

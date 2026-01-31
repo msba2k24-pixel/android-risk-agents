@@ -7,7 +7,12 @@ from typing import Any, Dict
 
 from huggingface_hub import InferenceClient
 
-from .db import get_uninsighted_changes, get_snapshot_text_by_id, insert_insight
+from .db import (
+    get_uninsighted_changes,
+    get_snapshot_text_by_id,
+    insert_insight,
+    create_baseline_changes,
+)
 
 
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -68,7 +73,6 @@ def safe_output(obj: Dict[str, Any]) -> Dict[str, Any]:
         confidence = 0.5
 
     confidence = max(0.0, min(1.0, confidence))
-
     return {"summary": summary[:1200], "confidence": confidence}
 
 
@@ -76,11 +80,18 @@ def run() -> int:
     client = InferenceClient(model=MODEL, token=HF_TOKEN)
 
     changes = get_uninsighted_changes(limit=25)
+
+    # First-run demo fallback
     if not changes:
-        print("No changes pending insights.")
+        created = create_baseline_changes(limit=10)
+        print(f"No changes pending insights. Created baseline changes: {created}")
+        changes = get_uninsighted_changes(limit=25)
+
+    if not changes:
+        print("Still no changes available after baseline creation.")
         return 0
 
-    created = 0
+    created_insights = 0
     for ch in changes:
         try:
             old_text = ""
@@ -111,7 +122,7 @@ def run() -> int:
                 confidence=out["confidence"],
             )
 
-            created += 1
+            created_insights += 1
             print(f"Insight created for change_id={ch.id}")
 
             time.sleep(0.4)
@@ -120,7 +131,7 @@ def run() -> int:
             print(f"Insight failed for change_id={getattr(ch, 'id', 'unknown')}: {e}")
             continue
 
-    print(f"Done. Created {created}/{len(changes)} insights.")
+    print(f"Done. Created {created_insights}/{len(changes)} insights.")
     return 0
 
 

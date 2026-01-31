@@ -30,6 +30,14 @@ jobs:
         run: |
           python -m src.seed_sources
 
+      - name: Discover latest bulletins
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          USER_AGENT: "android-risk-agents-bot/0.1 (github-actions)"
+        run: |
+          python -m src.discover_bulletins
+          
       - name: Scrape sources
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

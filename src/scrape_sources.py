@@ -2,8 +2,8 @@
 
 import hashlib
 import re
-import time
 from datetime import datetime, timezone
+from typing import Tuple
 
 import requests
 from bs4 import BeautifulSoup
@@ -13,11 +13,13 @@ from .config import USER_AGENT
 
 
 HEADERS = {"User-Agent": USER_AGENT}
+
 MIN_CLEAN_TEXT_LEN = 1200
 MAX_CLEAN_TEXT_CHARS = 25000
+REQUEST_TIMEOUT_S = 30
 
 
-def _utc_now_iso():
+def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -35,6 +37,7 @@ def _normalize_ws(text: str) -> str:
 def _remove_noise(root) -> None:
     for tag in root.find_all(["script", "style", "noscript", "svg", "canvas"]):
         tag.decompose()
+    # optional extra noise removal (safe)
     for tag in root.find_all(["nav", "footer", "header", "aside"]):
         tag.decompose()
 
@@ -51,57 +54,24 @@ def _cap_text(text: str, max_chars: int) -> str:
     return head.rstrip() + "\n\n[...truncated...]\n\n" + tail.lstrip()
 
 
-def fetch_clean_text(url: str, timeout_s: int = 30) -> dict:
-    t0 = time.time()
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=timeout_s, allow_redirects=True)
-        fetch_ms = int((time.time() - t0) * 1000)
-    except Exception as e:
-        return {
-            "ok": False,
-            "status_code": 0,
-            "final_url": url,
-            "fetch_ms": int((time.time() - t0) * 1000),
-            "clean_text": "",
-            "skip_reason": f"request_error:{type(e).__name__}",
-        }
+def fetch_raw_and_clean(url: str) -> Tuple[str, str]:
+    """
+    Returns (raw_html, clean_text).
+    Raises requests exceptions upward so the job fails loudly (better for debugging).
+    """
+    resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT_S, allow_redirects=True)
+    resp.raise_for_status()
 
-    html_raw = resp.text or ""
-    soup = BeautifulSoup(html_raw, "html.parser")
+    raw_html = resp.text or ""
+
+    soup = BeautifulSoup(raw_html, "html.parser")
     root = _pick_root(soup)
     _remove_noise(root)
 
     clean_text = _normalize_ws(root.get_text("\n", strip=True))
     clean_text = _cap_text(clean_text, MAX_CLEAN_TEXT_CHARS)
 
-    if resp.status_code >= 400:
-        return {
-            "ok": False,
-            "status_code": resp.status_code,
-            "final_url": str(resp.url),
-            "fetch_ms": fetch_ms,
-            "clean_text": clean_text,
-            "skip_reason": f"http_error:{resp.status_code}",
-        }
-
-    if len(clean_text) < MIN_CLEAN_TEXT_LEN:
-        return {
-            "ok": False,
-            "status_code": resp.status_code,
-            "final_url": str(resp.url),
-            "fetch_ms": fetch_ms,
-            "clean_text": clean_text,
-            "skip_reason": f"clean_text_too_short:{len(clean_text)}",
-        }
-
-    return {
-        "ok": True,
-        "status_code": resp.status_code,
-        "final_url": str(resp.url),
-        "fetch_ms": fetch_ms,
-        "clean_text": clean_text,
-        "skip_reason": None,
-    }
+    return raw_html, clean_text
 
 
 def main():
@@ -110,7 +80,7 @@ def main():
 
     sources = (
         sb.table("sources")
-        .select("id,name,url,active")
+        .select("id,name,url")
         .eq("active", True)
         .execute()
         .data
@@ -119,34 +89,41 @@ def main():
     print(f"Found {len(sources)} active sources", flush=True)
 
     inserted = 0
+    skipped = 0
 
     for s in sources:
+        src_id = s["id"]
+        name = s["name"]
         url = s["url"]
-        r = fetch_clean_text(url)
 
-        content_hash = _sha256(r["clean_text"] or "")
+        try:
+            raw_html, clean_text = fetch_raw_and_clean(url)
+        except Exception as e:
+            # fail loudly so you can see the real cause in Actions logs
+            raise RuntimeError(f"Fetch failed for source='{name}' url='{url}': {e}")
+
+        if len(clean_text) < MIN_CLEAN_TEXT_LEN:
+            skipped += 1
+            print(f"Skipped (too short): {name} len={len(clean_text)}", flush=True)
+            continue
 
         payload = {
-            "source_id": s["id"],
+            "source_id": src_id,
             "fetched_at": now,
-            "content_hash": content_hash,
-            "content": r["clean_text"],
-            "status_code": r["status_code"],
-            "final_url": r["final_url"],
-            "fetch_ms": r["fetch_ms"],
-            "should_skip": (not r["ok"]),
-            "skip_reason": r["skip_reason"],
+            "content_hash": _sha256(clean_text),
+            "raw_text": raw_html,
+            "clean_text": clean_text,
         }
 
         res = sb.table("snapshots").insert(payload).execute()
 
         if not res.data:
-            raise RuntimeError(f"Insert failed for source={s['name']} url={url}")
+            raise RuntimeError(f"Insert failed for source='{name}' url='{url}'")
 
         inserted += 1
-        print(f"Inserted snapshot for {s['name']} skip={payload['should_skip']}", flush=True)
+        print(f"Inserted snapshot: {name}", flush=True)
 
-    print(f"✅ Done. Inserted {inserted} snapshots.", flush=True)
+    print(f"✅ Done. inserted={inserted} skipped={skipped}", flush=True)
 
 
 if __name__ == "__main__":

@@ -179,8 +179,7 @@ def create_baseline_changes(limit: int = 10) -> int:
         to_insert.append(
             {
                 "source_id": sid,
-                # NOT NULL constraint: set prev = new snapshot id
-                "prev_snapshot_id": snap_id,
+                "prev_snapshot_id": snap_id,  # NOT NULL constraint
                 "new_snapshot_id": snap_id,
                 "diff_json": {"type": "baseline", "note": "Initial baseline change for demo"},
                 "created_at": now,
@@ -195,3 +194,27 @@ def create_baseline_changes(limit: int = 10) -> int:
 
     sb.table("changes").insert(to_insert).execute()
     return len(to_insert)
+
+
+def insert_insight(
+    change_id: int,
+    agent_name: str,
+    title: str,
+    summary: str,
+    confidence: float,
+) -> None:
+    """
+    Option A demo: insert minimal fields into insights table.
+    """
+    sb = get_supabase_client()
+
+    payload = {
+        "change_id": int(change_id),
+        "agent_name": agent_name,
+        "title": title,
+        "summary": summary,
+        "confidence": float(confidence),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    sb.table("insights").insert(payload).execute()

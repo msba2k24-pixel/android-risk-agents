@@ -11,7 +11,6 @@ from bs4 import BeautifulSoup
 from .db import get_supabase_client
 from .config import USER_AGENT
 
-
 HEADERS = {"User-Agent": USER_AGENT}
 
 MIN_CLEAN_TEXT_LEN = 1200
@@ -37,7 +36,6 @@ def _normalize_ws(text: str) -> str:
 def _remove_noise(root) -> None:
     for tag in root.find_all(["script", "style", "noscript", "svg", "canvas"]):
         tag.decompose()
-    # optional extra noise removal (safe)
     for tag in root.find_all(["nav", "footer", "header", "aside"]):
         tag.decompose()
 
@@ -55,16 +53,12 @@ def _cap_text(text: str, max_chars: int) -> str:
 
 
 def fetch_raw_and_clean(url: str) -> Tuple[str, str]:
-    """
-    Returns (raw_html, clean_text).
-    Raises requests exceptions upward so the job fails loudly (better for debugging).
-    """
     resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT_S, allow_redirects=True)
     resp.raise_for_status()
 
     raw_html = resp.text or ""
-
     soup = BeautifulSoup(raw_html, "html.parser")
+
     root = _pick_root(soup)
     _remove_noise(root)
 
@@ -88,7 +82,7 @@ def main():
 
     print(f"Found {len(sources)} active sources", flush=True)
 
-    inserted = 0
+    inserted_or_updated = 0
     skipped = 0
 
     for s in sources:
@@ -99,7 +93,6 @@ def main():
         try:
             raw_html, clean_text = fetch_raw_and_clean(url)
         except Exception as e:
-            # fail loudly so you can see the real cause in Actions logs
             raise RuntimeError(f"Fetch failed for source='{name}' url='{url}': {e}")
 
         if len(clean_text) < MIN_CLEAN_TEXT_LEN:
@@ -107,23 +100,23 @@ def main():
             print(f"Skipped (too short): {name} len={len(clean_text)}", flush=True)
             continue
 
+        content_hash = _sha256(clean_text)
+
         payload = {
             "source_id": src_id,
             "fetched_at": now,
-            "content_hash": _sha256(clean_text),
+            "content_hash": content_hash,
             "raw_text": raw_html,
             "clean_text": clean_text,
         }
 
-        res = sb.table("snapshots").insert(payload).execute()
+        # Requires UNIQUE constraint on (source_id, content_hash)
+        sb.table("snapshots").upsert(payload, on_conflict="source_id,content_hash").execute()
+        inserted_or_updated += 1
 
-        if not res.data:
-            raise RuntimeError(f"Insert failed for source='{name}' url='{url}'")
+        print(f"Stored snapshot: {name}", flush=True)
 
-        inserted += 1
-        print(f"Inserted snapshot: {name}", flush=True)
-
-    print(f"✅ Done. inserted={inserted} skipped={skipped}", flush=True)
+    print(f"✅ Done. stored={inserted_or_updated} skipped={skipped}", flush=True)
 
 
 if __name__ == "__main__":

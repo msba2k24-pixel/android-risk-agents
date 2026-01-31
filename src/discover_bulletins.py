@@ -20,6 +20,8 @@ MONTH_RE = re.compile(
     re.I,
 )
 
+TOP_N = 2  # keep minimal; change to 3 if you want
+
 
 def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -42,6 +44,7 @@ def _extract_month_bulletin_links(html: str, base_url: str):
         abs_url = urljoin(base_url, href)
         links.append((text, abs_url))
 
+    # Deduplicate by URL
     seen = set()
     uniq = []
     for t, u in links:
@@ -79,23 +82,10 @@ def main():
     if not links:
         raise RuntimeError("No month bulletin links found on bulletin index page.")
 
-    # Take the newest 3 (page usually lists newest first)
-    top = links[:3]
-
-    added = 0
-    updated = 0
+    top = links[:TOP_N]
 
     for title, url in top:
         name = f"Android Security Bulletin - {title}"
-
-        existing = (
-            sb.table("sources")
-            .select("id")
-            .eq("url", url)
-            .limit(1)
-            .execute()
-            .data
-        )
 
         payload = {
             "agent_name": AGENT_NAME,
@@ -106,14 +96,10 @@ def main():
             "created_at": now,
         }
 
-        if existing:
-            sb.table("sources").update(payload).eq("id", existing[0]["id"]).execute()
-            updated += 1
-        else:
-            sb.table("sources").insert(payload).execute()
-            added += 1
+        # Requires UNIQUE constraint on sources(url)
+        sb.table("sources").upsert(payload, on_conflict="url").execute()
 
-    print(f"✅ Bulletin discovery done. added={added} updated={updated} tracked={len(top)}", flush=True)
+    print(f"✅ Bulletin discovery done. tracked={len(top)}", flush=True)
 
 
 if __name__ == "__main__":

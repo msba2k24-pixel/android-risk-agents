@@ -1,3 +1,5 @@
+# src/seed_sources.py
+
 from datetime import datetime, timezone
 from .db import get_supabase_client
 
@@ -8,20 +10,15 @@ SOURCES = [
     {"name": "Android Developers Blog", "url": "https://android-developers.googleblog.com/", "fetch_type": "html"},
     {"name": "Google Play Developer Policy Center", "url": "https://play.google/developer-content-policy/", "fetch_type": "html"},
     {"name": "Play Integrity API Docs", "url": "https://developer.android.com/google/play/integrity", "fetch_type": "html"},
+    {"name": "CISA KEV Catalog", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", "fetch_type": "html"},
 ]
+
 
 def main():
     sb = get_supabase_client()
     now = datetime.now(timezone.utc).isoformat()
 
     for s in SOURCES:
-        # Try find existing row by URL first
-        existing = sb.table("sources").select("id").eq("url", s["url"]).limit(1).execute().data
-
-        # If not found, try by name (to update old/bad URL rows)
-        if not existing:
-            existing = sb.table("sources").select("id").eq("name", s["name"]).limit(1).execute().data
-
         payload = {
             "agent_name": AGENT_NAME,
             "name": s["name"],
@@ -31,12 +28,11 @@ def main():
             "created_at": now,
         }
 
-        if existing:
-            sb.table("sources").update(payload).eq("id", existing[0]["id"]).execute()
-        else:
-            sb.table("sources").insert(payload).execute()
+        # Requires UNIQUE constraint on sources(url)
+        sb.table("sources").upsert(payload, on_conflict="url").execute()
 
-    print("✅ Sources seeded/updated (URL fixes applied).")
+    print("✅ Sources seeded/updated (idempotent via upsert).", flush=True)
+
 
 if __name__ == "__main__":
     main()

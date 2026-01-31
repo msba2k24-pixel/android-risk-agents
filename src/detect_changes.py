@@ -1,11 +1,20 @@
+# src/detect_changes.py
+
 from datetime import datetime, timezone
 from .db import get_supabase_client
+
 
 def main():
     sb = get_supabase_client()
     now = datetime.now(timezone.utc).isoformat()
 
-    sources = sb.table("sources").select("id,name").eq("active", True).execute().data
+    sources = (
+        sb.table("sources")
+        .select("id,name")
+        .eq("active", True)
+        .execute()
+        .data
+    )
 
     for src in sources:
         snaps = (
@@ -37,8 +46,10 @@ def main():
             "created_at": now,
         }
 
-        sb.table("changes").insert(payload).execute()
-        print(f"🚨 Change detected for {src['name']}")
+        # Requires UNIQUE constraint on (source_id, new_snapshot_id)
+        sb.table("changes").upsert(payload, on_conflict="source_id,new_snapshot_id").execute()
+        print(f"🚨 Change detected for {src['name']}", flush=True)
+
 
 if __name__ == "__main__":
     main()

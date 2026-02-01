@@ -48,12 +48,17 @@ def _cap_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     head = text[: int(max_chars * 0.7)]
-    tail = text[-int(max_chars * 0.3):]
+    tail = text[-int(max_chars * 0.3) :]
     return head.rstrip() + "\n\n[...truncated...]\n\n" + tail.lstrip()
 
 
 def fetch_raw_and_clean(url: str) -> Tuple[str, str]:
-    resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT_S, allow_redirects=True)
+    resp = requests.get(
+        url,
+        headers=HEADERS,
+        timeout=REQUEST_TIMEOUT_S,
+        allow_redirects=True,
+    )
     resp.raise_for_status()
 
     raw_html = resp.text or ""
@@ -82,7 +87,7 @@ def main():
 
     print(f"Found {len(sources)} active sources", flush=True)
 
-    inserted_or_updated = 0
+    inserted = 0
     skipped = 0
 
     for s in sources:
@@ -110,13 +115,13 @@ def main():
             "clean_text": clean_text,
         }
 
-        # Requires UNIQUE constraint on (source_id, content_hash)
-        sb.table("snapshots").upsert(payload, on_conflict="source_id,content_hash").execute()
-        inserted_or_updated += 1
+        # ✅ Option A: always insert a new snapshot row (even if same hash)
+        sb.table("snapshots").insert(payload).execute()
+        inserted += 1
 
         print(f"Stored snapshot: {name}", flush=True)
 
-    print(f"✅ Done. stored={inserted_or_updated} skipped={skipped}", flush=True)
+    print(f"✅ Done. inserted={inserted} skipped={skipped}", flush=True)
 
 
 if __name__ == "__main__":

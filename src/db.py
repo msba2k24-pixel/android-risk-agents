@@ -129,39 +129,26 @@ def get_uninsighted_changes(limit: int = 25) -> List[ChangeRow]:
     return out
 
 
-def create_baseline_changes(limit: int = 10) -> int:
+def create_baseline_changes(limit: int = 50) -> int:
     """
-    First-run demo helper:
-    changes.prev_snapshot_id is NOT NULL, so baseline uses prev=new=latest snapshot id.
-    Creates "baseline" change rows for sources that have snapshots but no changes yet.
+    Create one baseline change per source that has >=1 snapshot and has no changes yet.
+
+    Note: changes.prev_snapshot_id is NOT NULL in your schema, so baseline uses prev=new=latest snapshot id.
+    This allows insights generation even on first run.
     """
     sb = get_supabase_client()
 
-    snaps_resp = (
-        sb.table("snapshots")
-        .select("id, source_id, fetched_at")
-        .order("fetched_at", desc=True)
-        .limit(300)
-        .execute()
-    )
-    snaps = snaps_resp.data or []
-    if not snaps:
+    # Get all sources
+    src_resp = sb.table("sources").select("id").limit(5000).execute()
+    sources = src_resp.data or []
+    if not sources:
         return 0
 
-    latest_by_source: Dict[int, Dict[str, Any]] = {}
-    for s in snaps:
-        sid = s.get("source_id")
-        snap_id = s.get("id")
-        if sid is None or snap_id is None:
-            continue
-        sid_i = int(sid)
-        if sid_i not in latest_by_source:
-            latest_by_source[sid_i] = s
-
-    source_ids = list(latest_by_source.keys())
+    source_ids = [int(s["id"]) for s in sources if s.get("id") is not None]
     if not source_ids:
         return 0
 
+    # Find sources that already have changes
     ch_resp = (
         sb.table("changes")
         .select("source_id")
@@ -177,18 +164,34 @@ def create_baseline_changes(limit: int = 10) -> int:
     to_insert: List[Dict[str, Any]] = []
     now = datetime.now(timezone.utc).isoformat()
 
-    for sid, snap in latest_by_source.items():
+    # For each source, fetch its latest snapshot
+    for sid in source_ids:
         if sid in existing_sources:
             continue
 
-        snap_id = int(snap["id"])
+        snap_resp = (
+            sb.table("snapshots")
+            .select("id")
+            .eq("source_id", sid)
+            .order("fetched_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        row = _safe_first(snap_resp.data)
+        if not row or row.get("id") is None:
+            continue
+
+        snap_id = int(row["id"])
 
         to_insert.append(
             {
                 "source_id": sid,
                 "prev_snapshot_id": snap_id,
                 "new_snapshot_id": snap_id,
-                "diff_json": {"type": "baseline", "note": "Initial baseline change for demo"},
+                "diff_json": {
+                    "type": "baseline",
+                    "note": "Initial baseline for first-run briefing",
+                },
                 "created_at": now,
             }
         )
@@ -243,5 +246,4 @@ def insert_insight(
     if risk_score is not None:
         payload["risk_score"] = int(risk_score)
 
-    # ✅ idempotent insert/update by change_id
     sb.table("insights").upsert(payload, on_conflict="change_id").execute()

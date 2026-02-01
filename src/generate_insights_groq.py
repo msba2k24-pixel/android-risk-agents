@@ -19,18 +19,16 @@ if not GROQ_API_KEY:
 
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
-# Two-stage models (override via env if you want)
 MODEL_TRIAGE = os.getenv("GROQ_MODEL_TRIAGE", "llama-3.1-8b-instant")
 MODEL_ANALYZE = os.getenv("GROQ_MODEL_ANALYZE", "llama-3.3-70b-versatile")
 
 AGENT_NAME = os.getenv("AGENT_NAME", "groq-digital-risk-agent")
-
 RELEVANCE_THRESHOLD = int(os.getenv("RELEVANCE_THRESHOLD", "70"))
 
 SYSTEM_TRIAGE = (
     "You are a Digital Risk Intelligence triage agent for a fraud prevention team. "
-    "Your job is to decide if the change between OLD and NEW text is relevant to digital fraud risk monitoring. "
-    "Be strict. Prefer false negatives over false positives when uncertain. "
+    "Decide if the change between OLD and NEW text is relevant to digital fraud risk monitoring. "
+    "Be strict. Prefer false negatives over false positives if uncertain. "
     "Return ONLY valid JSON. Do not include markdown."
 )
 
@@ -45,7 +43,7 @@ SYSTEM_ANALYZE = (
 
 def extract_json_only(s: str) -> Dict[str, Any]:
     s = (s or "").strip()
-    # Handle accidental fenced blocks
+
     if s.startswith("```"):
         parts = s.split("```")
         if len(parts) >= 2:
@@ -136,8 +134,7 @@ def build_triage_prompt(old_text: str, new_text: str, url: str) -> str:
     )
 
 
-def build_analysis_prompt(old_text: str, new_text: str, url: str, triage: Dict[str, Any]) -> str:
-    # Keep your existing DB schema, but enforce digital-risk framing.
+def build_analysis_prompt(old_text: str, new_text: str, url: str, triage: Dict[str, Any], is_baseline: bool) -> str:
     schema_hint = {
         "title": "string",
         "summary": "string (2-5 sentences, concrete and actionable)",
@@ -157,23 +154,40 @@ def build_analysis_prompt(old_text: str, new_text: str, url: str, triage: Dict[s
         "relevance_score": triage.get("relevance_score"),
     }
 
+    baseline_block = ""
+    if is_baseline:
+        baseline_block = (
+            "Special case:\n"
+            "OLD and NEW may be identical because this is an INITIAL BASELINE BRIEFING for a newly monitored source.\n"
+            "In that case, do not claim something changed. Instead summarize what the source covers and extract "
+            "digital risk opportunities, signals, and how we can leverage them.\n\n"
+        )
+
     return (
         f"SOURCE: {url}\n\n"
         f"TRIAGE CONTEXT:\n{json.dumps(triage_hint)}\n\n"
         f"OLD TEXT (trimmed):\n{old_text[:4500]}\n\n"
         f"NEW TEXT (trimmed):\n{new_text[:4500]}\n\n"
+        f"{baseline_block}"
         "Instructions:\n"
-        "1) Focus on what changed and how it affects digital fraud risk and detection.\n"
-        "2) List affected_signals as new or restricted signals (device, identity, behavioral, telemetry, permissions).\n"
+        "1) Focus on platform capability changes, policy updates, SDK or API changes, or attacker capability shifts.\n"
+        "2) affected_signals should be new or restricted signals (device, identity, behavioral, telemetry, permissions).\n"
         "3) recommended_actions must be leverage opportunities (collection, features, scoring, rules, investigations).\n"
-        "4) Do NOT output generic advice like 'apply mitigations' unless it directly enables detection improvements.\n"
+        "4) Avoid generic advice like 'apply mitigations' unless it directly enables detection improvements.\n"
         "5) If unknown, say unknown.\n\n"
         "Return JSON only.\n"
         f"Schema:\n{json.dumps(schema_hint)}"
     )
 
 
-def _call_llm(client: OpenAI, model: str, system: str, prompt: str, temperature: float, max_tokens: int) -> Dict[str, Any]:
+def _call_llm(
+    client: OpenAI,
+    model: str,
+    system: str,
+    prompt: str,
+    temperature: float,
+    max_tokens: int,
+) -> Dict[str, Any]:
     resp = client.chat.completions.create(
         model=model,
         messages=[
@@ -192,9 +206,8 @@ def run() -> int:
 
     changes = get_uninsighted_changes(limit=25)
 
-    # First-run helper: if no changes exist yet, create baselines
     if not changes:
-        created = create_baseline_changes(limit=10)
+        created = create_baseline_changes(limit=50)
         print(f"No changes pending insights. Created baseline changes: {created}")
         changes = get_uninsighted_changes(limit=25)
 
@@ -212,7 +225,10 @@ def run() -> int:
 
             new_text = get_snapshot_text_by_id(int(ch.new_snapshot_id)) or ""
 
-            # Stage 1: strict triage
+            is_baseline = False
+            if ch.old_snapshot_id is not None and int(ch.old_snapshot_id) == int(ch.new_snapshot_id):
+                is_baseline = True
+
             triage_prompt = build_triage_prompt(old_text, new_text, ch.url)
             triage_raw = _call_llm(
                 client=client,
@@ -231,24 +247,25 @@ def run() -> int:
 
             primary_theme = str(triage_raw.get("primary_theme", "other"))[:80]
 
-            # If not relevant, still upsert an insight to close the change cleanly
             if (not is_relevant) or (rel_score < RELEVANCE_THRESHOLD):
                 title = f"Not relevant to digital risk (score {rel_score})"
                 summary = (
                     "This update does not appear to change data collection capabilities, platform policies, "
-                    "or attacker/detection dynamics in a way that is actionable for digital fraud risk monitoring. "
+                    "or attacker and detection dynamics in a way that is actionable for digital fraud risk monitoring. "
                     f"Theme: {primary_theme}. "
                     f"Hint: {str(triage_raw.get('what_changed_hint', 'unknown'))[:200]}"
                 )
-                out = safe_output({
-                    "title": title,
-                    "summary": summary,
-                    "category": primary_theme,
-                    "affected_signals": [],
-                    "recommended_actions": [],
-                    "risk_score": 1,
-                    "confidence": 0.55,
-                })
+                out = safe_output(
+                    {
+                        "title": title,
+                        "summary": summary,
+                        "category": primary_theme,
+                        "affected_signals": [],
+                        "recommended_actions": [],
+                        "risk_score": 1,
+                        "confidence": 0.55,
+                    }
+                )
 
                 insert_insight(
                     change_id=ch.id,
@@ -267,8 +284,7 @@ def run() -> int:
                 time.sleep(0.20)
                 continue
 
-            # Stage 2: deep analysis for relevant items
-            analysis_prompt = build_analysis_prompt(old_text, new_text, ch.url, triage_raw)
+            analysis_prompt = build_analysis_prompt(old_text, new_text, ch.url, triage_raw, is_baseline=is_baseline)
             analysis_raw = _call_llm(
                 client=client,
                 model=MODEL_ANALYZE,
@@ -280,12 +296,10 @@ def run() -> int:
 
             out = safe_output(analysis_raw)
 
-            # Ensure category is aligned to triage theme if model left it empty
             if not out.get("category"):
                 out["category"] = primary_theme
 
-            # Optional: reflect triage score in the title for stakeholders
-            if out["title"] and "score" not in out["title"].lower():
+            if out["title"] and "relevance" not in out["title"].lower():
                 out["title"] = f"{out['title']} (relevance {rel_score})"[:120]
 
             insert_insight(

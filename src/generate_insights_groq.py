@@ -44,6 +44,7 @@ SYSTEM_ANALYZE = (
 def extract_json_only(s: str) -> Dict[str, Any]:
     s = (s or "").strip()
 
+    # Handle accidental fenced blocks
     if s.startswith("```"):
         parts = s.split("```")
         if len(parts) >= 2:
@@ -134,7 +135,37 @@ def build_triage_prompt(old_text: str, new_text: str, url: str) -> str:
     )
 
 
-def build_analysis_prompt(old_text: str, new_text: str, url: str, triage: Dict[str, Any], is_baseline: bool) -> str:
+def build_baseline_briefing_prompt(new_text: str, url: str) -> str:
+    """
+    Baseline briefing for a newly monitored source (first run, no meaningful diff).
+    This MUST still produce actionable insight (what the source is + how to leverage it).
+    """
+    schema_hint = {
+        "title": "string",
+        "summary": "string (2-5 sentences, what this source is + why it matters for digital risk)",
+        "category": "string (e.g., vulnerability_intel|platform_change|policy_change|threat_actor|other)",
+        "affected_signals": ["string (signals or intel outputs we can derive, up to 5)"],
+        "recommended_actions": ["string (leverage ideas for risk pipeline, up to 5)"],
+        "risk_score": "integer 1..5 (urgency to pay attention to this source)",
+        "confidence": "number 0..1",
+    }
+
+    return (
+        f"SOURCE: {url}\n\n"
+        "This is an INITIAL BASELINE BRIEFING for a newly monitored source.\n"
+        "Do not claim something changed.\n"
+        "Extract what this source provides and how a digital fraud risk team can leverage it.\n\n"
+        "Specific requirement:\n"
+        "- If this is a list or catalog (e.g., CVE/KEV), explain what it tracks and pull out 3-5 notable recent entries "
+        "from the visible text (if present).\n"
+        "- recommended_actions must be leverage opportunities (features, scoring, rules, monitoring), not generic patch advice.\n\n"
+        f"CONTENT (trimmed):\n{new_text[:7000]}\n\n"
+        "Return JSON only.\n"
+        f"Schema:\n{json.dumps(schema_hint)}"
+    )
+
+
+def build_analysis_prompt(old_text: str, new_text: str, url: str, triage: Dict[str, Any]) -> str:
     schema_hint = {
         "title": "string",
         "summary": "string (2-5 sentences, concrete and actionable)",
@@ -154,21 +185,11 @@ def build_analysis_prompt(old_text: str, new_text: str, url: str, triage: Dict[s
         "relevance_score": triage.get("relevance_score"),
     }
 
-    baseline_block = ""
-    if is_baseline:
-        baseline_block = (
-            "Special case:\n"
-            "OLD and NEW may be identical because this is an INITIAL BASELINE BRIEFING for a newly monitored source.\n"
-            "In that case, do not claim something changed. Instead summarize what the source covers and extract "
-            "digital risk opportunities, signals, and how we can leverage them.\n\n"
-        )
-
     return (
         f"SOURCE: {url}\n\n"
         f"TRIAGE CONTEXT:\n{json.dumps(triage_hint)}\n\n"
         f"OLD TEXT (trimmed):\n{old_text[:4500]}\n\n"
         f"NEW TEXT (trimmed):\n{new_text[:4500]}\n\n"
-        f"{baseline_block}"
         "Instructions:\n"
         "1) Focus on platform capability changes, policy updates, SDK or API changes, or attacker capability shifts.\n"
         "2) affected_signals should be new or restricted signals (device, identity, behavioral, telemetry, permissions).\n"
@@ -225,10 +246,42 @@ def run() -> int:
 
             new_text = get_snapshot_text_by_id(int(ch.new_snapshot_id)) or ""
 
+            # Baseline detection: prev == new snapshot id
             is_baseline = False
             if ch.old_snapshot_id is not None and int(ch.old_snapshot_id) == int(ch.new_snapshot_id):
                 is_baseline = True
 
+            # ✅ Baseline bypass: do NOT triage based on diffs. Always produce a baseline briefing from NEW text.
+            if is_baseline:
+                baseline_prompt = build_baseline_briefing_prompt(new_text, ch.url)
+                baseline_raw = _call_llm(
+                    client=client,
+                    model=MODEL_ANALYZE,
+                    system=SYSTEM_ANALYZE,
+                    prompt=baseline_prompt,
+                    temperature=0.2,
+                    max_tokens=520,
+                )
+                out = safe_output(baseline_raw)
+
+                insert_insight(
+                    change_id=ch.id,
+                    agent_name=AGENT_NAME,
+                    title=out["title"],
+                    summary=out["summary"],
+                    confidence=out["confidence"],
+                    category=out["category"],
+                    affected_signals=out["affected_signals"],
+                    recommended_actions=out["recommended_actions"],
+                    risk_score=out["risk_score"],
+                )
+
+                created_insights += 1
+                print(f"Baseline briefing insight upserted for change_id={ch.id}")
+                time.sleep(0.25)
+                continue
+
+            # Stage 1: strict triage for real diffs
             triage_prompt = build_triage_prompt(old_text, new_text, ch.url)
             triage_raw = _call_llm(
                 client=client,
@@ -284,7 +337,8 @@ def run() -> int:
                 time.sleep(0.20)
                 continue
 
-            analysis_prompt = build_analysis_prompt(old_text, new_text, ch.url, triage_raw, is_baseline=is_baseline)
+            # Stage 2: deep analysis for relevant diffs
+            analysis_prompt = build_analysis_prompt(old_text, new_text, ch.url, triage_raw)
             analysis_raw = _call_llm(
                 client=client,
                 model=MODEL_ANALYZE,

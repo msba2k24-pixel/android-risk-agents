@@ -1,9 +1,9 @@
-name: iOS Dry Run - Apple Release Notes (121161)
+name: iOS Dry Run - Discover + Scrape Apple Security Updates (100100)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 14 * * *"   # optional, remove if you want manual only
+    - cron: "15 14 * * *"
 
 jobs:
   ios_dry_run:
@@ -22,10 +22,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: iOS dry run ingest
+      - name: Discover iOS security update sources (100100)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           USER_AGENT: ${{ secrets.USER_AGENT }}
         run: |
-          python -m src.ios_release_notes_121161
+          python -m src.discover_ios_security_updates
+
+      - name: Scrape all active sources and store snapshots
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          USER_AGENT: ${{ secrets.USER_AGENT }}
+        run: |
+          python -m src.scrape_sources

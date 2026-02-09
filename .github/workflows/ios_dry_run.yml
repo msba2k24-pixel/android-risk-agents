@@ -1,0 +1,31 @@
+name: iOS Dry Run - Apple Release Notes (121161)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 14 * * *"   # optional, remove if you want manual only
+
+jobs:
+  ios_dry_run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: iOS dry run ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          USER_AGENT: ${{ secrets.USER_AGENT }}
+        run: |
+          python -m src.ios_release_notes_121161

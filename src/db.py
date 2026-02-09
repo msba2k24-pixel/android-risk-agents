@@ -3,11 +3,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from supabase import create_client
 
-from .config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, validate_env
+from .config import (
+    SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY,
+    validate_env,
+    VECTOR_TABLE,
+    VECTOR_RPC_MATCH,
+)
 
 
 def get_supabase_client():
@@ -45,6 +51,19 @@ def get_snapshot_text_by_id(snapshot_id: int) -> str:
     return row.get("clean_text") or ""
 
 
+def get_snapshot_text_and_hash_by_id(snapshot_id: int) -> Tuple[str, str]:
+    sb = get_supabase_client()
+    resp = (
+        sb.table("snapshots")
+        .select("clean_text, content_hash")
+        .eq("id", snapshot_id)
+        .limit(1)
+        .execute()
+    )
+    row = _safe_first(resp.data) or {}
+    return (row.get("clean_text") or "", row.get("content_hash") or "")
+
+
 def _get_source_url(source_id: int) -> str:
     sb = get_supabase_client()
     resp = (
@@ -60,13 +79,63 @@ def _get_source_url(source_id: int) -> str:
     return row.get("url") or ""
 
 
+def get_latest_snapshot_for_source(source_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Returns latest snapshot row {id, content_hash, fetched_at} or None.
+    """
+    sb = get_supabase_client()
+    resp = (
+        sb.table("snapshots")
+        .select("id, content_hash, fetched_at")
+        .eq("source_id", source_id)
+        .order("fetched_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return _safe_first(resp.data)
+
+
+# ---------------------------
+# Vector DB helpers (pgvector)
+# ---------------------------
+
+def upsert_vector_chunks(rows: List[Dict[str, Any]]) -> None:
+    """
+    Upserts chunk rows into vector_chunks. Requires UNIQUE(source_id, snapshot_sha, kind, chunk_index)
+    """
+    if not rows:
+        return
+    sb = get_supabase_client()
+    sb.table(VECTOR_TABLE).upsert(
+        rows,
+        on_conflict="source_id,snapshot_sha,kind,chunk_index",
+    ).execute()
+
+
+def vector_search(
+    query_embedding: List[float],
+    match_count: int = 8,
+    filter_source_id: Optional[str] = None,
+    filter_kind: Optional[str] = None,
+):
+    """
+    Calls RPC match_vector_chunks(query_embedding, match_count, filter_source_id, filter_kind)
+    """
+    sb = get_supabase_client()
+    payload: Dict[str, Any] = {
+        "query_embedding": query_embedding,
+        "match_count": int(match_count),
+        "filter_source_id": filter_source_id,
+        "filter_kind": filter_kind,
+    }
+    return sb.rpc(VECTOR_RPC_MATCH, payload).execute()
+
+
+# ---------------------------
+# Insights pipeline helpers
+# ---------------------------
+
 def get_uninsighted_changes(limit: int = 25) -> List[ChangeRow]:
-    """
-    Returns latest changes that do not yet have an insights row.
-    Schema:
-      changes: id, source_id, prev_snapshot_id, new_snapshot_id, created_at
-      insights: change_id (UNIQUE)
-    """
     sb = get_supabase_client()
 
     changes_resp = (
@@ -130,15 +199,8 @@ def get_uninsighted_changes(limit: int = 25) -> List[ChangeRow]:
 
 
 def create_baseline_changes(limit: int = 50) -> int:
-    """
-    Create one baseline change per source that has >=1 snapshot and has no changes yet.
-
-    Note: changes.prev_snapshot_id is NOT NULL in your schema, so baseline uses prev=new=latest snapshot id.
-    This allows insights generation even on first run.
-    """
     sb = get_supabase_client()
 
-    # Get all sources
     src_resp = sb.table("sources").select("id").limit(5000).execute()
     sources = src_resp.data or []
     if not sources:
@@ -148,7 +210,6 @@ def create_baseline_changes(limit: int = 50) -> int:
     if not source_ids:
         return 0
 
-    # Find sources that already have changes
     ch_resp = (
         sb.table("changes")
         .select("source_id")
@@ -164,7 +225,6 @@ def create_baseline_changes(limit: int = 50) -> int:
     to_insert: List[Dict[str, Any]] = []
     now = datetime.now(timezone.utc).isoformat()
 
-    # For each source, fetch its latest snapshot
     for sid in source_ids:
         if sid in existing_sources:
             continue
@@ -188,10 +248,7 @@ def create_baseline_changes(limit: int = 50) -> int:
                 "source_id": sid,
                 "prev_snapshot_id": snap_id,
                 "new_snapshot_id": snap_id,
-                "diff_json": {
-                    "type": "baseline",
-                    "note": "Initial baseline for first-run briefing",
-                },
+                "diff_json": {"type": "baseline", "note": "Initial baseline for first-run briefing"},
                 "created_at": now,
             }
         )
@@ -217,13 +274,6 @@ def insert_insight(
     recommended_actions: Optional[List[str]] = None,
     risk_score: Optional[int] = None,
 ) -> None:
-    """
-    Inserts an insight row. Since you added UNIQUE(change_id),
-    we UPSERT on change_id to be idempotent on reruns.
-
-    Option 1 DB: defaults exist for category, jsonb fields, created_at.
-    We only include optional fields if provided so DB defaults can apply.
-    """
     sb = get_supabase_client()
 
     payload: Dict[str, Any] = {

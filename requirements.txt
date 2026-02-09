@@ -3,6 +3,12 @@ requests
 beautifulsoup4
 lxml
 readability-lxml
+
 supabase
-huggingface_hub>=0.24.0
 openai>=1.40.0
+
+# embeddings / RAG
+sentence-transformers>=2.6.0
+torch>=2.2.0
+
+huggingface_hub>=0.24.0

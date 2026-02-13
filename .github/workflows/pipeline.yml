@@ -12,7 +12,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -23,49 +23,74 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Cache HF models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
 
-      # ---- Your existing steps here (seed sources, scrape, embed, etc.) ----
-      # - name: Seed sources (idempotent)
-      #   run: python -m src.seed_sources
-      # - name: Scrape sources
-      #   run: python -m src.scrape_sources
+      - name: Seed sources (idempotent)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          USER_AGENT: "android-risk-agents-bot/0.1 (github-actions)"
+        run: python -m src.seed_sources
+
+      - name: Discover latest bulletins
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          USER_AGENT: "android-risk-agents-bot/0.1 (github-actions)"
+        run: python -m src.discover_bulletins
+
+      - name: Scrape sources (embeddings created here)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          USER_AGENT: "android-risk-agents-bot/0.1 (github-actions)"
+          VECTOR_DIM: "384"
+          EMBED_BASELINE_ON_FIRST_SNAPSHOT: "true"
+        run: python -m src.scrape_sources
+
+      - name: Detect changes (delta embeddings here)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          EMBED_DELTAS_ON_CHANGE: "true"
+        run: python -m src.detect_changes
 
       - name: Warm up Modal vLLM (OpenAI-compatible)
         env:
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          MODEL_TRIAGE: ${{ secrets.MODEL_TRIAGE }}
         run: |
           python - << 'PY'
-          import os, sys
-          import requests
+          import os, sys, requests
 
           base = os.environ["LLM_BASE_URL"].rstrip("/")
           key = os.environ["LLM_API_KEY"]
-
-          # Try the lightest endpoint first.
-          # Many vLLM deployments expose /v1/models.
-          url = f"{base}/v1/models"
           headers = {"Authorization": f"Bearer {key}"}
 
           try:
-            r = requests.get(url, headers=headers, timeout=20)
+            r = requests.get(f"{base}/v1/models", headers=headers, timeout=20)
             print("Warmup /v1/models:", r.status_code)
-            # If /v1/models isn't available, fallback to a tiny chat completion.
             if r.status_code >= 400:
               raise RuntimeError("models endpoint not OK")
           except Exception:
-            url2 = f"{base}/v1/chat/completions"
             payload = {
-              "model": os.getenv("MODEL_TRIAGE", "mistral-small"),
+              "model": os.environ.get("MODEL_TRIAGE", "mistral-small"),
               "messages": [{"role": "user", "content": "warmup"}],
               "max_tokens": 5,
               "temperature": 0
             }
-            r2 = requests.post(url2, headers=headers, json=payload, timeout=30)
+            r2 = requests.post(f"{base}/v1/chat/completions", headers=headers, json=payload, timeout=30)
             print("Warmup /v1/chat/completions:", r2.status_code)
             if r2.status_code >= 400:
               print(r2.text[:300])
@@ -74,20 +99,15 @@ jobs:
 
       - name: Generate insights (Modal)
         env:
-          # Supabase secrets you already have
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-          # Modal vLLM OpenAI-compatible endpoint
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
 
-          # Model selection
           MODEL_TRIAGE: ${{ secrets.MODEL_TRIAGE }}
           MODEL_ANALYZE: ${{ secrets.MODEL_ANALYZE }}
 
-          # Optional knobs
           RELEVANCE_THRESHOLD: "70"
           AGENT_NAME: "modal-digital-risk-agent"
-        run: |
-          python -m src.generate_insights_monstral
+        run: python -m src.generate_insights_monstral

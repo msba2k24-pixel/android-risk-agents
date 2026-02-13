@@ -2,7 +2,7 @@
 import os
 import json
 import time
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 
 from openai import OpenAI
 
@@ -13,7 +13,6 @@ from .db import (
     create_baseline_changes,
 )
 
-# Modal vLLM (OpenAI-compatible) endpoint + key
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 
@@ -22,17 +21,16 @@ if not LLM_BASE_URL:
 if not LLM_API_KEY:
     raise RuntimeError("LLM_API_KEY is missing. Add it as a GitHub Actions secret.")
 
-# Models served by your Modal vLLM deployment
-MODEL_TRIAGE = os.getenv("MODEL_TRIAGE", "mistral-small")   # fast/cheap
-MODEL_ANALYZE = os.getenv("MODEL_ANALYZE", "mistral-large") # stronger
+MODEL_TRIAGE = os.getenv("MODEL_TRIAGE", "mistral-small")
+MODEL_ANALYZE = os.getenv("MODEL_ANALYZE", "mistral-large")
 
 AGENT_NAME = os.getenv("AGENT_NAME", "modal-digital-risk-agent")
 RELEVANCE_THRESHOLD = int(os.getenv("RELEVANCE_THRESHOLD", "70"))
 
-REQUEST_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "60"))
+# Longer timeout helps with cold start + first inference
+REQUEST_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "180"))
 MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "4"))
 RETRY_BASE_S = float(os.getenv("LLM_RETRY_BASE_S", "1.25"))
-
 
 client = OpenAI(
     base_url=LLM_BASE_URL.rstrip("/"),
@@ -45,6 +43,16 @@ def _sleep_backoff(attempt: int) -> None:
     time.sleep(RETRY_BASE_S * (2 ** attempt))
 
 
+def _strip_code_fences(text: str) -> str:
+    t = (text or "").strip()
+    if t.startswith("```"):
+        # Remove leading/trailing fences, and optional "json" language tag
+        t = t.strip().strip("`").strip()
+        if t.lower().startswith("json"):
+            t = t[4:].strip()
+    return t
+
+
 def _safe_json_loads(s: str) -> Optional[Dict[str, Any]]:
     try:
         return json.loads(s)
@@ -52,12 +60,9 @@ def _safe_json_loads(s: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _call_chat_json(model: str, system: str, user: str, max_tokens: int = 900) -> Dict[str, Any]:
-    """
-    Calls an OpenAI-compatible chat endpoint and returns parsed JSON.
-    Retries on transient failures.
-    """
+def _call_chat_json(model: str, system: str, user: str, max_tokens: int) -> Dict[str, Any]:
     last_err: Optional[Exception] = None
+
     for attempt in range(MAX_RETRIES):
         try:
             resp = client.chat.completions.create(
@@ -69,25 +74,22 @@ def _call_chat_json(model: str, system: str, user: str, max_tokens: int = 900) -
                 temperature=0.2,
                 max_tokens=max_tokens,
             )
-            text = (resp.choices[0].message.content or "").strip()
 
-            # If the model wraps JSON in code fences, strip them.
-            if text.startswith("```"):
-                text = text.strip("`")
-                # common pattern: ```json ... ```
-                text = text.replace("json\n", "", 1).strip()
+            raw = (resp.choices[0].message.content or "").strip()
+            cleaned = _strip_code_fences(raw)
 
-            parsed = _safe_json_loads(text)
+            parsed = _safe_json_loads(cleaned)
             if parsed is None:
-                raise ValueError(f"Model did not return valid JSON. Raw: {text[:300]}")
+                raise ValueError(f"Model did not return valid JSON. Raw: {raw[:300]}")
 
             return parsed
+
         except Exception as e:
             last_err = e
             if attempt < MAX_RETRIES - 1:
                 _sleep_backoff(attempt)
-            else:
-                raise RuntimeError(f"LLM call failed after retries: {e}") from e
+                continue
+            raise RuntimeError(f"LLM call failed after retries: {e}") from e
 
     raise RuntimeError(f"LLM call failed: {last_err}")
 
@@ -120,6 +122,7 @@ Return ONLY valid JSON with this schema:
 }
 """
 
+
 def triage_change(change: Dict[str, Any], snapshot_text: str) -> Dict[str, Any]:
     user = f"""
 Change record:
@@ -146,10 +149,10 @@ Snapshot text excerpt:
 
 
 def run_insights_pipeline() -> Dict[str, Any]:
-    # If you use a baseline mechanism, keep it idempotent
     create_baseline_changes()
 
-    changes = get_uninsighted_changes(limit=50)  # adjust if you want
+    changes = get_uninsighted_changes(limit=50)
+
     kept = 0
     discarded = 0
     inserted = 0
@@ -166,14 +169,14 @@ def run_insights_pipeline() -> Dict[str, Any]:
         triage = triage_change(ch, snapshot_text)
 
         score = int(triage.get("relevance_score", 0) or 0)
-        decision = triage.get("decision", "discard")
+        decision = (triage.get("decision") or "discard").lower().strip()
 
         if decision != "keep" or score < RELEVANCE_THRESHOLD:
             discarded += 1
-            # Optional: you can still store triage notes somewhere if you have a column/table
             continue
 
         kept += 1
+
         insight = analyze_change(ch, snapshot_text, triage)
 
         insert_insight(
@@ -187,7 +190,6 @@ def run_insights_pipeline() -> Dict[str, Any]:
         )
         inserted += 1
 
-        # small pacing to reduce burst load on vLLM autoscale
         time.sleep(0.3)
 
     return {
@@ -199,6 +201,7 @@ def run_insights_pipeline() -> Dict[str, Any]:
         "triage_model": MODEL_TRIAGE,
         "analyze_model": MODEL_ANALYZE,
         "threshold": RELEVANCE_THRESHOLD,
+        "timeout_s": REQUEST_TIMEOUT_S,
     }
 
 

@@ -72,29 +72,55 @@ jobs:
           MODEL_TRIAGE: ${{ secrets.MODEL_TRIAGE }}
         run: |
           python - << 'PY'
-          import os, sys, requests
+          import os, time, requests
 
           base = os.environ["LLM_BASE_URL"].rstrip("/")
           key = os.environ["LLM_API_KEY"]
+          model = os.environ.get("MODEL_TRIAGE", "mistral-small")
           headers = {"Authorization": f"Bearer {key}"}
 
-          try:
-            r = requests.get(f"{base}/v1/models", headers=headers, timeout=20)
-            print("Warmup /v1/models:", r.status_code)
-            if r.status_code >= 400:
-              raise RuntimeError("models endpoint not OK")
-          except Exception:
+          deadline = time.time() + 300  # 5 minutes
+          attempt = 0
+
+          def try_models():
+            url = f"{base}/v1/models"
+            r = requests.get(url, headers=headers, timeout=(10, 60))
+            print("GET /v1/models:", r.status_code)
+            return r.status_code < 400
+
+          def try_chat():
+            url = f"{base}/v1/chat/completions"
             payload = {
-              "model": os.environ.get("MODEL_TRIAGE", "mistral-small"),
+              "model": model,
               "messages": [{"role": "user", "content": "warmup"}],
               "max_tokens": 5,
               "temperature": 0
             }
-            r2 = requests.post(f"{base}/v1/chat/completions", headers=headers, json=payload, timeout=30)
-            print("Warmup /v1/chat/completions:", r2.status_code)
-            if r2.status_code >= 400:
-              print(r2.text[:300])
-              sys.exit(1)
+            r = requests.post(url, headers=headers, json=payload, timeout=(10, 90))
+            print("POST /v1/chat/completions:", r.status_code)
+            return r.status_code < 400
+
+          while time.time() < deadline:
+            attempt += 1
+            try:
+              if try_models():
+                print("Warmup success via /v1/models")
+                raise SystemExit(0)
+            except Exception as e:
+              print(f"Attempt {attempt} /v1/models failed: {type(e).__name__}: {e}")
+
+            try:
+              if try_chat():
+                print("Warmup success via chat")
+                raise SystemExit(0)
+            except Exception as e:
+              print(f"Attempt {attempt} chat failed: {type(e).__name__}: {e}")
+
+            sleep_s = min(10 + attempt * 2, 30)
+            print(f"Sleeping {sleep_s}s before retry...")
+            time.sleep(sleep_s)
+
+          raise SystemExit("Warmup failed after 5 minutes")
           PY
 
       - name: Generate insights (Modal)
@@ -110,4 +136,7 @@ jobs:
 
           RELEVANCE_THRESHOLD: "70"
           AGENT_NAME: "modal-digital-risk-agent"
+
+          # Important for cold start / long first inference
+          LLM_TIMEOUT_S: "180"
         run: python -m src.generate_insights_monstral
